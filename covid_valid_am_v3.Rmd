@@ -642,3 +642,15 @@ ggplot(data, aes(x=max_score, y=odd, color = "")) +
     xlab("Score grades") + 
     theme(legend.position = "none")
 ```
+
+
+
+
+
+```{r}
+
+
+
+
+```
+
