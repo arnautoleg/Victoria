@@ -1,0 +1,637 @@
+---
+title: "covid_valid_MSE"
+author: "Mariia Sergeeva"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE,
+                      message=FALSE,
+                      error=FALSE,
+                      warning=FALSE)
+library(dplyr)
+library(tidyr)
+require(lubridate)
+library(ggplot2)
+library(stringr)
+library(zoo)
+
+library(readxl)
+library(flextable)
+```
+
+Импорт нескольких листов базы данных в  несколько датафреймов:
+
+df1 - общая информация о пациентах
+
+df2 - даты поступления и перевода пациентов из отделения в отделение
+
+df3 - экстренные анализы
+
+df4 - плановые анализы
+
+```{r}
+
+df1 <- read_excel("data/raw/COVID_PROJECT_UPDATE_16.11.2021.xlsx", "Lista totala") 
+df2 <- read_excel("data/raw/COVID_PROJECT_UPDATE_16.11.2021.xlsx", "Transferuri")
+df3 <- read_excel("data/raw/COVID_PROJECT_UPDATE_16.11.2021.xlsx", "Analize de urgenta")
+df4 <- read_excel("data/raw/COVID_PROJECT_UPDATE_16.11.2021.xlsx", "Analize planice")
+```
+Переименовываем столбцы в датафреймах с анализами и сшиваем в один датафрейм
+
+```{r}
+df3_r <- df3 %>% 
+  rename(date = AppliedDate, test = name, value = Value)
+
+df4_r <- df4 %>% 
+  rename(date = Date, test = Name, value = rezultat)
+
+df_test <- rbind(df3_r, df4_r)
+```
+
+Делаем переменную id во всех датафреймах фактором
+
+```{r}
+df1_id <- df1 %>% 
+  mutate(id = as.factor(id))
+df2_id <- df2 %>% 
+  mutate(id = as.factor(id))
+df_test_id <- df_test %>% 
+  mutate(id = as.factor(id))
+
+```
+
+Число уникальных пациентов в трех датафреймах
+
+```{r}
+length(unique(df1_id$id))      #4399
+length(unique(df2_id$id))      #4404
+length(unique(df_test_id$id))  #4183
+
+```
+
+Модифицируем датафрейм df2, чтобы суммировать данные по переводам из отделения в отделение в общую продолжительность госпитализации
+
+```{r}
+# Разделение колонок дата_время на отдельные колонки:
+
+df2_m <- df2_id %>% 
+  separate(StartDate, c("StartDate", "StartTime"), sep = " ") %>%
+  separate(EndDate, c("EndDate", "EndTime"), sep = " ")
+
+# Перевод дат в формат, пригодный для вычисления дней:
+
+df2_m$StartDate <- as.Date(df2_m$StartDate, format ="%Y-%m-%d")
+df2_m$EndDate <- as.Date(df2_m$EndDate, format="%Y-%m-%d")
+
+# Считаем продолжительность госпитализации в днях (для пациентов поступивших и выписавшихся в тот же день значение равно 0)
+
+df2_m$hospit_days <- df2_m$EndDate - df2_m$StartDate
+
+# Суммируем продолжительность госпитализации по пациентам в один датасет
+hosp_days <- df2_m %>%                                       
+  group_by(id) %>%                         
+  summarise(hospit_days_total = sum(hospit_days)) 
+
+# Преобразуем наш датасет сливая с датасетом по продолжительности госпитализации
+
+df2_new <-  merge(df2_m, hosp_days, by="id")
+
+df2_new$OutcomeDate <- df2_new$StartDate + df2_new$hospit_days_total 
+
+# оставляем только одну верхнюю строку для каждого пациента и нужные столбцы 
+df2_short <- df2_new[row.names(unique(df2_new[,c("id", "hospit_days_total")])),]
+
+# how many patients?
+
+length(unique(df2_short$id)) #4404
+nrow(df2_short)              #4404
+
+```
+
+
+Делаем один датафрэйм с общей информацией о пациентах объединяя датафреймы df1 и df2 по id пациентов 
+
+```{r}
+df_patients_raw <- merge(df1_id, df2_short, by = c("id")) 
+
+nrow(df_patients_raw) #4399 
+
+#часть пациентов из df2 потеряли, так как о них не было информации в df1 
+
+```
+
+Преобразуем датафрейм с информацией о пациентах:
+
+- оставляем только нужные столбцы
+
+- переименовываем столбцы
+
+```{r}
+df_patients <- df_patients_raw %>% 
+  select(id, sex, virsta, cicode, rezolvare, StartDate,
+         hospit_days_total, OutcomeDate) %>% 
+  rename(age = virsta, diagnosis = cicode, outcome = rezolvare,
+         hospitalization = hospit_days_total)
+
+```
+
+
+Делаем один общий датафрейм по информации и результам анализов
+
+```{r}
+
+df_raw <- merge(df_patients, df_test_id, by = c("id"))
+
+n_raw <- length(unique(df_raw$id))
+n_raw #4180
+
+#потеряли часть пациентов из обоих датасетов - и df_patients, и df_test_id   
+
+```
+
+Преобразуем даты анализов и считаем дни от анализа до исхода
+
+```{r}
+
+df_raw$date <- as.Date(df_raw$date)
+
+df_raw$DaysBfOutcome <- as.numeric(df_raw$OutcomeDate - df_raw$date)
+
+```
+
+
+Фильтрация по информации об исходе: outcomeFilter
+
+```{r}
+
+outcomeFilter <- function (x)
+{
+ y <- x %>% 
+ filter(outcome != "transfer inter-spitalicesc")
+ n_before <- length(unique(x$id))
+ n_after <- length(unique(y$id)) 
+ reduction <- n_before - n_after
+ print(c("Patients before filtration: ", as.character(n_before)))
+ print(c("Transferred patients: ", as.character(reduction)))
+ print(c("Patients after filtration: ", as.character(n_after)))
+ return(y)
+}
+
+data_raw <- outcomeFilter(df_raw)
+
+```
+
+
+
+Поменяем значения исходов в датасете на 1/0
+
+```{r}
+
+died_outcomes <- c("Decedat in Reanimare", "decedat in sectie", "Decedat in TI BCV", "Decedat in TI",  "Decedat in izolator")
+
+survived_outcomes <- c("externat", "externat la cerere")
+
+data_raw$outcome <- ifelse(data_raw$outcome 
+                               %in% died_outcomes, 1, 0)
+
+```
+
+Сделаем переменные пол, диагноз и исход факторами
+
+```{r}
+
+data_raw <- data_raw %>% 
+  mutate(sex = as.factor(sex)) %>% 
+  mutate(diagnosis = as.factor(diagnosis)) %>% 
+  mutate(outcome = as.factor(outcome))
+
+```
+
+## Преобразуем базу данных перед переводом в широкий формат
+
+Список переменных для таблицы 1
+
+```{r}
+ALT <- c("Dozarea alaninaminotransferazei (ALT) in ser", "Dozarea ALT (alaninaminotransferazei)")
+Amilasa <- c("Dozarea a-amilazei in lichidele biologice (mat. cinetica)", "Amilaza in sange")
+APTT <- c("Timpul de tromboplastina  partial active  (TTPA)", "Timpul de trombina cu sulfat de protamine", "Timpul de tromboplastina partial activa")
+AST <- c("Dozarea aspartataminotransferazei (AST) in ser", "Dozarea AST (aspartataminotransferazei)")
+Conj_bilirubin <- c("Dozarea bilirubina conjugata", "Bilirubina conjugata", "Dozarea bilirubinei conjugate")
+Creatinin <- c("Dozarea creatininei in ser sau urina", "Dozarea creatininei", "Creatinina", "Dozarea creatininei in ser")
+CRP <- c("Determinarea proteinei C-reactive", "CRP")
+D_dimer <- c("D-Dimer", "D-dimeri")
+Ferritin <- c("Determinarea feritinei", "Ferritin")
+Fibrinogen <- c("Fibrinogenul", "Fibrinogen")
+Glucose <- c("Dozarea glucozei", "Glucoza", "Dozarea glucozei in sange")
+Hemoglobin <- c("Dozarea hemoglobinei")
+LDG <- c("Dozarea lactatdehidrogenazei (LDH) in ser", "Lactat dehidrogenaza")
+Lymphocytes <- c("Limfocite")
+Monocytes <- c("Monocite")
+Neutrophils <- c("Segmentate")
+Platelets <- c("Numaratoarea trombocitelor")
+Potassium <- c("Dozarea potasiului in serul sanguin", "K", "K+")
+Procalcitonin <- c("Procalcitonina", "Determinarea Procalcitoninei")
+Sodium <- c("Dozarea sodiului in serul sanguin", "Na", "Na+")
+Total_protein <- c("Dozarea proteinei totale", "Dozarea proteinei  totale")
+Urea <- c("Dozarea ureei", "Ureea", "Uree")
+WBC <- c("Numaratoarea leucocitelor", "WBC")
+#BMI, Toponin I - показатели отсутствуют в базе
+
+```
+
+Заменяем названия тестов на английские: renameTest
+```{r}
+
+renameTest <- function(x) 
+{
+x$test <- ifelse(x$test %in% ALT, "ALT", x$test)
+x$test <- ifelse(x$test %in% Amilasa, "Amilasa", x$test)
+x$test <- ifelse(x$test %in% APTT, "APTT", x$test)
+x$test <- ifelse(x$test %in% AST, "AST", x$test)
+x$test <- ifelse(x$test %in% Conj_bilirubin, "Conj_bilirubin", x$test)
+x$test <- ifelse(x$test %in% Creatinin, "Creatinin", x$test)
+x$test <- ifelse(x$test %in% CRP, "CRP", x$test)
+x$test <- ifelse(x$test %in% D_dimer, "D_dimer", x$test)
+x$test <- ifelse(x$test %in% Ferritin, "Ferritin", x$test)
+x$test <- ifelse(x$test %in% Fibrinogen, "Fibrinogen", x$test)
+x$test <- ifelse(x$test %in% Glucose, "Glucose", x$test)
+x$test <- ifelse(x$test %in% Hemoglobin, "Hemoglobin", x$test)
+x$test <- ifelse(x$test %in% LDG, "LDG", x$test)
+x$test <- ifelse(x$test %in% Lymphocytes, "Lymphocytes", x$test)
+x$test <- ifelse(x$test %in% Monocytes, "Monocytes", x$test)
+x$test <- ifelse(x$test %in% Neutrophils, "Neutrophils", x$test)
+x$test <- ifelse(x$test %in% Platelets, "Platelets", x$test)
+x$test <- ifelse(x$test %in% Potassium, "Potassium", x$test)
+x$test <- ifelse(x$test %in% Procalcitonin, "Procalcitonin", x$test)
+x$test <- ifelse(x$test %in% Sodium, "Sodium", x$test)
+x$test <- ifelse(x$test %in% Total_protein, "Total_protein", x$test)
+x$test <- ifelse(x$test %in% Urea, "Urea", x$test)
+x$test <- ifelse(x$test %in% WBC, "WBC", x$test)
+return(x)
+}
+
+df_renamed <- renameTest(data_raw)
+
+```
+
+Преобразуем значения тестов в числовые и удаляем некорректные
+: correctValue
+
+(+правим D_dimer *1000)
+
+```{r}
+correctValue <- function(x)
+{
+n_before <- length(unique(x$id))
+
+x$value <- gsub('[_><]', '', x$value)
+x$value <- gsub('min', '', x$value)
+x$value <- trimws(x$value, which = c("both"), whitespace = "[ \t\r\n]")
+x <- filter(x, !str_detect(value, '[A-z+/]'))
+
+x$value <- as.numeric(as.character(x$value))
+
+x$value <- ifelse(x$test == "D_dimer", x$value * 1000, x$value)
+
+n_after <- length(unique(x$id)) 
+reduction <- n_before - n_after
+
+print(c("Patients before filtration: ", as.character(n_before)))
+print(c("Lost patients: ", as.character(reduction)))
+print(c("Patients after filtration: ", as.character(n_after)))
+
+return(x)  
+}
+
+df_corr <- correctValue(df_renamed)
+
+table(is.na(df_corr$value))
+
+
+```
+
+Фильтрация по тестам из таблицы 1: table1Filter
+
+```{r}
+
+table1Filter <- function(x)
+  {
+  n_before <- length(unique(x$id))
+  table1 <- c("ALT", "Amilasa", "APTT", "AST",
+                 "Conj_bilirubin", "Creatinin", "CRP", 
+                 "D_dimer", "Ferritin",  "Fibrinogen", 
+                 "Glucose", "Hemoglobin", "LDG",  "Lymphocytes",
+                 "Monocytes", "Neutrophils", "Platelets", 
+                 "Potassium","Procalcitonin", "Sodium",
+                 "Total_protein", "Urea", "WBC")
+
+  x <- x %>%  filter(test %in% table1)
+
+  n_after <- length(unique(x$id)) 
+  reduction <- n_before - n_after
+
+print(c("Patients before filtration: ", as.character(n_before)))
+print(c("Lost patients: ", as.character(reduction)))
+print(c("Patients after filtration: ", as.character(n_after)))
+
+return(x)  
+}
+
+df_long <- table1Filter(df_corr)
+
+```
+
+Посмотрим сколько пациентов с тестами из таблицы 3
+
+(спойлер - столько же, сколько для таблицы 1 )
+
+```{r}
+table3 <- c("APTT", "CRP", "D_dimer", "Glucose",
+            "Hemoglobin", "Lymphocytes", "Total_protein", 
+            "Urea", "WBC")
+
+df_table3 <- df_corr %>% 
+  filter(test %in% table3)
+
+length(unique(df_table3$id)) #4138
+
+```
+
+
+## Переводим базу в широкий формат
+
+```{r}
+
+data_long_to_wide <- df_long %>%
+  group_by(id, sex, age, diagnosis, StartDate, OutcomeDate, outcome, hospitalization, date, test) %>% 
+  dplyr::summarise(value_med = median(value, na.rm = TRUE))
+
+length(unique(data_long_to_wide$id)) #4116
+
+data_wide <-  pivot_wider(data_long_to_wide, names_from = "test", values_from = "value_med") %>%
+  group_by(id) %>% arrange(id , date) %>%  
+  mutate_all(funs(na.locf(., na.rm = FALSE)))
+
+data_wide$DaysBfOutcome <- data_wide$OutcomeDate - data_wide$date
+length(unique(data_wide$id)) #4116
+
+```
+
+
+Фильтрация по анализам за 21 день до исхода: day20Filter
+
+```{r}
+
+day20Filter <- function(x)
+{
+  y <- x %>% 
+ filter(DaysBfOutcome >= 0 & DaysBfOutcome < 21)
+ n_before <- length(unique(x$id))
+ n_after <- length(unique(y$id)) 
+ reduction <- n_before - n_after
+ print(c("Patients before filtration: ", as.character(n_before)))
+ print(c("Filtered patients: ", as.character(reduction)))
+ print(c("Patients after filtration: ", as.character(n_after)))
+ return(y)
+}
+
+df_filtered_3 <- day20Filter(df_renamed)
+
+
+
+```
+Фильтрация по госпитализации менее 3-х дней: shortFilter
+
+```{r}
+shortFilter <- function(x)
+{
+y <- x %>% 
+ filter(hospitalization > 2)
+ n_before <- length(unique(x$id))
+ n_after <- length(unique(y$id)) 
+ reduction <- n_before - n_after
+ print(c("Patients before filtration: ", as.character(n_before)))
+ print(c("Filtered patients: ", as.character(reduction)))
+ print(c("Patients after filtration: ", as.character(n_after)))
+ return(y)
+}
+
+data_filtered <- shortFilter(data_wide)
+
+data_filtered <- shortFilter(df_renamed)
+
+```
+
+
+Фильтрация по диагнозу: diagnosisFilter
+
+```{r}
+diagnosisFilter <- function(x)
+{
+respiratory <- c("B342", "B972", "J069", "J110", "J128",
+                 "J129", "J168", "J182", "J189", "J209",
+                 "J440", "J960", "J969", "U072")
+y <- x %>% 
+ filter(diagnosis %in% respiratory)
+ n_before <- length(unique(x$id))
+ n_after <- length(unique(y$id)) 
+ reduction <- n_before - n_after
+ print(c("Patients before filtration: ", as.character(n_before)))
+ print(c("Filtered patients: ", as.character(reduction)))
+ print(c("Patients after filtration: ", as.character(n_after)))
+ return(y)
+}
+
+df_filtered_4 <- diagnosisFilter(df_renamed)
+
+```
+
+## Делаем финальную БД
+
+```{r}
+
+data_final <- data_wide %>% 
+  shortFilter() %>% 
+  day20Filter() %>%
+  diagnosisFilter()
+
+```
+
+
+##Характеризуем рабочую базу данных пациентов
+
+Cколько пациентов умерло и выжило
+
+```{r}
+total <- length(unique(data_final$id)) 
+total #3162
+
+survived <- length(unique((data_final %>%
+                             filter(outcome == 0))$id)) 
+survived #2258
+round(survived/total*100, digits = 1) #71.4
+
+died <- length(unique((data_final %>% 
+                             filter(outcome == 1))$id))
+died #904
+round(died/total*100, digits = 1) #28.6
+
+```
+
+Cколько пациентов с каждым диагнозом
+
+```{r}
+data_final %>% 
+  distinct(id, .keep_all = TRUE) %>% 
+  group_by(diagnosis) %>% 
+  tally()
+```
+
+Продолжительность госпитализации
+
+```{r}
+data_final %>% 
+  distinct(id, .keep_all = TRUE) %>% 
+  group_by(outcome) %>% 
+  summarise(
+    mean = mean(hospitalization, na.rm = TRUE)
+    %>% as.numeric() %>% round(digits = 1),
+    sd = sd(hospitalization, na.rm = TRUE)
+    %>% as.numeric() %>% round(digits = 1),
+    median = median(hospitalization, na.rm = TRUE)
+    %>% as.numeric() %>% round(digits = 1),
+    MAD = mad(hospitalization, na.rm = TRUE)
+    %>% as.numeric() %>% round(digits = 0),
+  ) %>% 
+  flextable()
+
+
+
+```
+
+Возраст
+
+```{r}
+data_final %>% 
+  distinct(id, .keep_all = TRUE) %>% 
+  group_by(outcome) %>% 
+    summarise(
+    median = median(age, na.rm = TRUE)  %>% round(digits = 1),
+    MAD = mad(age, na.rm = TRUE) %>% round(digits = 1)
+  ) %>% 
+  flextable()
+
+data_final %>% 
+  distinct(id, .keep_all = TRUE) %>% 
+    ungroup() %>% 
+  summarise(
+    median = median(age, na.rm = TRUE)  %>% round(digits = 1),
+    MAD = mad(age, na.rm = TRUE) %>% round(digits = 1)
+  ) %>% 
+  flextable()
+
+ 
+
+```
+
+Распределение по полу
+
+```{r}
+
+total <- length(unique(data_final$id))
+total
+
+male <- length(unique((data_final %>%
+                             filter(sex == "M"))$id))
+male #1517
+round(male/total*100, digits = 1) #48
+
+female <- length(unique((data_final %>% 
+                             filter(sex == "F"))$id))
+female #1645
+round(female/total*100, digits = 1) #52
+
+```
+Таблица 1
+
+```{r}
+table1Stat <- list(
+  '__median' = function(x) {median(x, na.rm = TRUE)%>% 
+    round(digits = 1)},
+  '__MAD' = function(x) {mad(x, na.rm = TRUE) %>% 
+    round(digits = 1)}
+)
+
+data_final %>% 
+  distinct(id, .keep_all = TRUE) %>% 
+    ungroup() %>% 
+  summarise(across(table1, table1Stat)) %>% 
+    pivot_longer(everything()) %>% 
+  separate(name, into = c("Test", "Stat"), sep = "__")
+
+
+table1Stat(data_final)
+ 
+
+```
+
+
+##Графики базовых характеристик
+
+```{r}
+df_filtered_4 %>% 
+  distinct(id, .keep_all = TRUE) -> df_basic
+```
+
+
+Продолжительность госпитализации
+
+```{r}
+ggplot(df_basic, aes(y = hospitalization, 
+                     x = outcome)) +
+  geom_boxplot(width = 0.4, aes(fill = outcome)) +
+  scale_fill_manual(values = c("#00BFC4", "#F8766B"))+
+  theme_classic() +
+  ylab("Продолжительность госпитализации, дни") +
+  xlab("Исход")
+
+```
+
+Возраст
+
+```{r}
+ggplot(df_basic, aes(y = age, 
+                     x = outcome,
+                     fill = outcome)) +
+  geom_boxplot(width = 0.4) +
+  theme_classic() +
+  ylab("Возраст, лет") +
+  xlab("Исход")
+
+```
+
+Даты поступления 
+
+```{r}
+
+ggplot(df_basic, aes(x = StartDate, fill = outcome)) +
+  geom_histogram(binwidth = 7) +
+  scale_fill_manual(values = c("#00BFC4", "#F8766B"))+
+  theme_classic() +
+  xlab("Дата госпитализации")+
+  ylab("Число пациентов")+
+  labs(fill = "Исход")
+
+summary(df_basic$StartDate)
+summary(df_basic$OutcomeDate)
+```
+
+
+
+
+
+
+
+
+

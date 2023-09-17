@@ -1,0 +1,505 @@
+---
+title: "covid_valid_am"
+author: "Alisa Morshneva & Alexey Glazkov"
+date: "28/11/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE,
+                      message=FALSE,
+                      error=FALSE,
+                      warning=FALSE)
+library(dplyr)
+library(tidyr)
+require(lubridate)
+library(ggplot2)
+library(stringr)
+library(zoo)
+library(readxl)
+library(flextable)
+
+```
+
+## Read data
+
+```{r}
+# transferuri_raw <- read.csv("data/transferuri_new.csv")
+# analysis_p <- read.csv("data/analize_planice_new.csv")
+# analysis_u <- read.csv("data/analize_urgenta_new.csv")
+# info_raw <- read.csv("data/total.csv")
+
+transferuri_raw <- read_xlsx("COVID_PROJECT_UPDATE_16.11.2021.xlsx", 2)
+analysis_p <- read_xlsx("COVID_PROJECT_UPDATE_16.11.2021.xlsx", 4)
+analysis_u <- read_xlsx("COVID_PROJECT_UPDATE_16.11.2021.xlsx", 3)
+info_raw <- read_xlsx("COVID_PROJECT_UPDATE_16.11.2021.xlsx", 1)
+
+```
+## Parse data
+```{r}
+# Разделение колонок дата_время на отдельные колонки:
+transferuri <-transferuri_raw %>% 
+    mutate(EndDate = as.Date(EndDate),
+           StartDate = as.Date(StartDate))
+
+# Дни с момента госпитализации и дни до исхода (добавляю 1, чтобы учесть день поступления и исключить возможность нулевых значений при исходе в день поступления)
+transferuri$hospit_days <- transferuri$EndDate - transferuri$StartDate
+hosp_days <- transferuri %>%                                       
+  group_by(id) %>%                         
+  summarise(hospit_days_total = sum(hospit_days)) 
+transferuri <-  merge(transferuri, hosp_days, by="id")
+transferuri$OutcomeDate <- transferuri$StartDate + transferuri$hospit_days_total 
+
+transfer <- select(transferuri, c(id, StartDate, hospit_days_total, OutcomeDate))
+transfer <- transfer[row.names(unique(transfer[,c("id", "hospit_days_total")])),]
+
+colnames(analysis_p) <-  c("id", "AnalysisDate","analiza", "rezultat")
+colnames(analysis_u) <- c("id", "AnalysisDate","analiza", "rezultat")
+
+analysis <- rbind(analysis_p, analysis_u)
+analysis$AnalysisDate <- as.Date(analysis$AnalysisDate)
+
+colnames(info_raw)[5] <- "Age"
+colnames(info_raw)[11] <- "Outcome"
+
+info <- info_raw[,c("id", "Age", "sex", "cicode","Outcome")]
+
+
+```
+
+# Merge data
+```{r}
+data_long_raw <- merge(transfer, analysis, by=c("id"))
+# Добавляем информацию по исходам
+data_long_raw <- merge(data_long_raw, info, by=c("id"))
+# Количество пациентов на старте
+length(unique(data_long_raw$id))
+
+#data_long_raw
+
+```
+# Filter rows
+```{r}
+
+# удаление пациентов, переведенных в другое учреждение
+data_long <- filter(data_long_raw, Outcome != 'transfer inter-spitalicesc')
+length(unique(data_long$id))
+
+# удаление пациентов c госпитализацией менее 2 дней
+data_long <- filter(data_long, hospit_days_total > 1)
+length(unique(data_long$id))
+
+# отбор пациентов, поступивших с диагнозом "ковид"
+data_long <- filter(data_long, cicode %in% c("B342", "B972", "J069", "J110", "J128", "J129", "J168", "J182", "J189", "J209", "J440", "J960", "J969", "U072")) 
+length(unique(data_long$id))
+
+
+# перевод исходов (0 - externat, 1 - decedat)
+data_long$Outcome <- as.factor(ifelse(substring(tolower(data_long$Outcome),1,1)=='e', 0, 1))
+
+# Количество пациентов после фильтрации
+length(unique(data_long$id))
+
+
+```
+```{r}
+# Подготовка данных для перевода в длинный формат
+data_long$rezultat <- gsub('[_><]', '', data_long$rezultat)
+data_long$rezultat <- gsub('min', '', data_long$rezultat)
+data_long$rezultat <- trimws(data_long$rezultat, which = c("both"), whitespace = "[ \t\r\n]")
+data_long <- filter(data_long, !str_detect(rezultat, '[A-z+/]'))
+
+data_long$rezultat <- as.numeric(as.character(data_long$rezultat))
+table(is.na(data_long$rezultat))
+
+head(data_long)
+```
+```{r}
+# Правим названия и размерности
+length(sort(unique(data_long$analiza)))
+data_long_upd <- data_long
+# D-Dimer
+data_long_upd$analiza <- gsub('D-dimeri', 'D-Dimer', data_long_upd$analiza)
+data_long_upd$rezultat <- ifelse(data_long_upd$analiza == 'D-Dimer', data_long_upd$rezultat * 1000, data_long_upd$rezultat)
+#
+data_long_upd$analiza <- ifelse(data_long_upd$analiza %in% c('Timpul de tromboplastina partial activa','TTPA-Timpul de tromboplastina partial active','Timpul de tromboplastina  partial active  (TTPA)') , "APTT", data_long_upd$analiza)
+data_long_upd$analiza <- ifelse(data_long_upd$analiza %in% c('Glucose','Glucoza','Dozarea glucozei','Dozarea glucozei in sange') , "Glucose", data_long_upd$analiza)
+data_long_upd$analiza <- ifelse(data_long_upd$analiza %in% c('Dozarea ureei','Ureea','Uree') , "Urea", data_long_upd$analiza)
+data_long_upd$analiza <- ifelse(data_long_upd$analiza %in% c('Leucocites','Numaratoarea leucocitelor') , "WBC", data_long_upd$analiza)
+#
+data_long_upd$analiza <- tolower(data_long_upd$analiza)
+data_long_upd$analiza <- gsub('  ', ' ', data_long_upd$analiza)
+data_long_upd$analiza <- gsub(':', '', data_long_upd$analiza)
+#data_long_upd$analiza <- gsub('-', '', data_long_upd$analiza, fixed = TRUE)
+data_long_upd$analiza <- gsub('+', '', data_long_upd$analiza, fixed = TRUE)
+data_long_upd$analiza <- gsub('ureea', 'uree', data_long_upd$analiza)
+data_long_upd$analiza <- gsub('uree', 'urea', data_long_upd$analiza)
+data_long_upd$analiza <- gsub('determinarea proteinei c-reactive', 'crp', data_long_upd$analiza) 
+data_long_upd$analiza <- gsub('dozarea proteinei totale', 'protein_total', data_long_upd$analiza) 
+data_long_upd$analiza <- gsub('total protein', 'protein_total', data_long_upd$analiza) 
+data_long_upd$analiza <- gsub('dozarea hemoglobinei', 'hg', data_long_upd$analiza) 
+
+data_long_upd$analiza <- gsub('singerare', 'sangerare', data_long_upd$analiza)
+data_long_upd$analiza <- gsub('clor', 'cl', data_long_upd$analiza)
+data_long_upd$analiza <- gsub('figrinogen', 'fibrinogen', data_long_upd$analiza, fixed=TRUE)
+data_long_upd$analiza <- gsub('fibrinogenul', 'fibrinogen', data_long_upd$analiza, fixed=TRUE) 
+data_long_upd$analiza <- gsub('ca2', 'calciu', data_long_upd$analiza, fixed=TRUE) 
+data_long_upd$analiza <- gsub(' o (aslo)', 'o', data_long_upd$analiza, fixed=TRUE) 
+data_long_upd$analiza <- gsub('densitatea', 'densitate', data_long_upd$analiza, fixed=TRUE) 
+data_long_upd$analiza <- gsub('centriguare', 'centrifugare', data_long_upd$analiza, fixed=TRUE) 
+data_long_upd$analiza <- trimws(data_long_upd$analiza, which = c("both"), whitespace = "[ \t\r\n]")
+length(sort(unique(data_long_upd$analiza)))
+#sort(unique(data_long_upd$analiza))
+
+data_long_to_wide <- data_long_upd %>%
+  group_by(id, StartDate, OutcomeDate, AnalysisDate, Outcome, analiza) %>% 
+  dplyr::summarise(rezultat_med = median(rezultat, na.rm = TRUE))
+
+
+```
+# Get final data (To wide + locf)
+```{r}
+data_full <-  pivot_wider(data_long_to_wide, names_from = "analiza", values_from = "rezultat_med") %>%
+  group_by(id) %>% arrange(id,AnalysisDate) %>%  mutate_all(funs(na.locf(., na.rm = FALSE)))
+
+data_full
+
+# Set formats and sort columns
+
+data_full$DaysBfOutcome <- as.character(data_full$OutcomeDate - data_full$AnalysisDate)
+data_full$DayOfHosp <- as.character(data_full$AnalysisDate - data_full$StartDate)
+data_full$limphocite_perc <- (data_full$limfocite/100)*data_full$wbc
+data_full <- select(data_full,-c(StartDate,OutcomeDate))
+
+data_full$id <- as.factor(data_full$id)
+
+data <- data_full %>% 
+  select(sapply(., class) %>% .[order(match(., c('factor', 'date', 'character','integer')))] %>% names) %>%
+  mutate(DaysBfOutcome = as.numeric(DaysBfOutcome)) %>%
+  filter(DaysBfOutcome >= 0 & DaysBfOutcome < 21) %>%
+  mutate(DaysBfOutcome = factor(DaysBfOutcome,
+                                levels = 21:0,
+                                labels = 21:0,
+                                ordered = TRUE))
+
+data
+# write.csv(data, file = "data_all_analyzes.csv")
+```
+
+# Сделаем дубликат данных до проведения locf
+
+```{r}
+
+data_full_NA <-  pivot_wider(data_long_to_wide, names_from = "analiza", values_from = "rezultat_med") %>%
+  group_by(id) %>% arrange(id,AnalysisDate)
+
+data_full_NA$DaysBfOutcome <- as.character(data_full_NA$OutcomeDate - data_full_NA$AnalysisDate)
+data_full_NA$DayOfHosp <- as.character(data_full_NA$AnalysisDate - data_full_NA$StartDate)
+data_full_NA$limphocite_perc <- (data_full_NA$limfocite/100)*data_full_NA$wbc
+data_full_NA <- select(data_full_NA,-c(StartDate,OutcomeDate))
+
+data_full_NA$id <- as.factor(data_full$id)
+
+data_9_NA <- data_full_NA %>% 
+  select(sapply(., class) %>% .[order(match(., c('factor', 'date', 'character','integer')))] %>% names) %>%
+  mutate(DaysBfOutcome = as.numeric(DaysBfOutcome)) %>%
+  filter(DaysBfOutcome >= 0 & DaysBfOutcome < 21) %>%
+  mutate(DaysBfOutcome = factor(DaysBfOutcome,
+                                levels = 21:0,
+                                labels = 21:0,
+                                ordered = TRUE)) %>% 
+  select(c(id, Outcome, DaysBfOutcome, DayOfHosp, AnalysisDate, 'd-dimer', urea, limphocite_perc, crp, protein_total, aptt, wbc, hg, glucose))
+
+
+
+```
+
+```{r}
+data_9 <- data %>%  
+    select(c(id, Outcome, DaysBfOutcome, DayOfHosp, AnalysisDate, 'd-dimer', urea, limphocite_perc, crp, protein_total, aptt, wbc, hg, glucose)) 
+
+
+data_9
+```
+
+
+```{r}
+score_9 <- data_9
+score_9$score <- 0
+score_9$score  <- ifelse(score_9$'d-dimer' > 2149 & !is.na(score_9$'d-dimer'), score_9$score + 4, score_9$score)
+score_9$score  <- ifelse(score_9$urea > 11 & !is.na(score_9$urea), score_9$score + 5, score_9$score)
+score_9$score  <- ifelse(score_9$limphocite_perc < 0.7 & !is.na(score_9$limphocite_perc), score_9$score + 3, score_9$score)
+score_9$score  <- ifelse(score_9$crp > 146 & !is.na(score_9$crp), score_9$score + 3, score_9$score)
+score_9$score  <- ifelse(score_9$protein_total < 61 & !is.na(score_9$protein_total), score_9$score + 6, score_9$score)
+score_9$score  <- ifelse(score_9$aptt > 42 & !is.na(score_9$aptt), score_9$score + 4, score_9$score)
+score_9$score  <- ifelse(score_9$wbc > 13.5 & !is.na(score_9$wbc), score_9$score + 4, score_9$score)
+score_9$score  <- ifelse(score_9$hg < 115 & !is.na(score_9$hg), score_9$score + 3, score_9$score)
+score_9$score  <- ifelse(score_9$glucose > 9 & !is.na(score_9$glucose), score_9$score + 4, score_9$score)
+score_9
+
+```
+
+```{r}
+
+# Делаем табличку с максимальным скором
+
+score_9 %>% 
+  group_by(id) %>% 
+  summarise(score = max(score),
+            outcome = Outcome[1]) -> max_score
+
+# Делаем модель логистической регрессии
+
+log_model <- glm(outcome ~ score, family=binomial(link='logit'), data = max_score)
+
+log_model %>% summary()
+
+```
+
+```{r}
+
+# Строим таблицу с частотами умерших и выживших пациентов
+
+max_score %>% 
+  group_by(score) %>% 
+  summarise(n_dead = sum(outcome == 1),
+            N = sum(!is.na(outcome))) %>% 
+  mutate(n_surv = N - n_dead, 
+         freq_dead = (100 * n_dead / N) %>% round(1),
+         freq_surv = (100 * n_surv / N) %>% round(1),                
+         .before = N) -> SurvDeadRate
+
+SurvDeadRate
+```
+
+```{r, fig.height = 3, fig.width = 6, dpi = 300}
+
+SurvDeadRate$model <- 100 / (1 + exp(5.9 - 0.29*SurvDeadRate$score))
+
+
+# рисуем доли выживших и умерших пациентов на разных уровнях score
+
+ggplot(SurvDeadRate, aes(x = score)) +
+  geom_line(aes(y = freq_dead), size = 0.5) +
+  geom_line(aes(y = model), color = "red", size = 0.7, alpha = 0.5)
+
+  
+ggplot(SurvDeadRate, aes(x = score)) +
+  geom_line(aes(y = freq_surv))
+
+```
+
+
+
+```{r}
+
+TP <- c()
+TN <- c()
+FP <- c()
+FN <- c()
+
+for (i in 1:length(SurvDeadRate$score)) {
+  TP[i] <- SurvDeadRate %>% filter(score > score[i]) %>% pull(n_dead) %>% sum()
+  FP[i] <- SurvDeadRate %>% filter(score > score[i]) %>% pull(n_surv) %>% sum()
+  TN[i] <- SurvDeadRate %>% filter(score <= score[i]) %>% pull(n_surv) %>% sum()
+  FN[i] <- SurvDeadRate %>% filter(score <= score[i]) %>% pull(n_dead) %>% sum()
+}
+
+Sens_DB <- tibble(score = SurvDeadRate$score, TP, FP, TN, FN) %>%
+  mutate(Sensitivity = 100 * TP / (TP + FN),
+         Specificity = 100 * TN / (TN + FP)) %>% 
+  rowwise() %>% 
+  mutate(LCL_Se = 100*binom.test(c(TP, FN))$conf.int[1],
+         UCL_Se = 100*binom.test(c(TP, FN))$conf.int[2],
+         LCL_Sp = 100*binom.test(c(TN, FP))$conf.int[1],
+         UCL_Sp = 100*binom.test(c(TN, FP))$conf.int[2],)
+
+Sens_DB
+
+```
+
+```{r, fig.height = 3, fig.width = 6, dpi = 300}
+
+Sens_DB_Se <- Sens_DB %>% 
+  select(score, value = Sensitivity, LCL = LCL_Se, UCL = UCL_Se) %>% 
+  mutate(`Score efficiency` = "Sensitivity")
+
+Sens_DB_Sp <- Sens_DB %>% 
+  select(score, value = Specificity, LCL = LCL_Sp, UCL = UCL_Sp) %>% 
+  mutate(`Score efficiency` = "Specificity")
+
+rbind(Sens_DB_Se, Sens_DB_Sp) %>% 
+  ggplot(aes(x = score, color = `Score efficiency`, fill = `Score efficiency`)) +
+    geom_ribbon(aes(ymin = LCL, ymax = UCL), alpha = 0.3, color = NA) + 
+    geom_line(aes(y = value), size = 1) +
+    labs(x = "Prognostic score threshold",
+         y = "Sensitivity / Specificity") + 
+    scale_y_continuous(breaks = seq(0, 100, by = 20)) +
+    scale_x_continuous(breaks = seq(0, 36, by = 4)) +
+    theme_bw()
+
+
+```
+
+```{r}
+
+# Считаем максимальный день до исхода, когда первый раз сработал score для каждого пациента.
+
+PrRange <- data.frame(score = NA, M = NA, LCL = NA, UCL = NA) %>% 
+  mutate_all(~ as.numeric(.x))
+
+for (i in 1:length(unique(score_9$score))) {
+  score_9 %>% 
+    filter(Outcome == 1, score >= unique(score_9$score)[i]) %>%
+    mutate(DaysBfOutcome = as.character(DaysBfOutcome) %>% as.numeric()) %>% 
+    group_by(id) %>% 
+    summarise(first_trigger = max(DaysBfOutcome)) %>% 
+    ungroup() %>% 
+    summarise(M = mean(first_trigger),
+              LCL = t.test(first_trigger)$conf.int[1],
+              UCL = t.test(first_trigger)$conf.int[2]) -> stats
+  PrRange[i, "score"] <- unique(score_9$score)[i]
+  PrRange[i, "M"] <- stats$M[1]
+  PrRange[i, "LCL"] <- stats$LCL[1]
+  PrRange[i, "UCL"] <- stats$UCL[1]
+}
+
+
+PrRange
+
+```
+
+```{r, fig.height = 3, fig.width = 5, dpi = 300}
+
+PrRange %>% ggplot(aes(x = score)) +
+  geom_point(aes(y = M)) + 
+  geom_linerange(aes(ymin = LCL, ymax = UCL)) +
+  labs(x = "Prognostic score threshold",
+       y = "Average prediction range") + 
+  scale_x_continuous(breaks = seq(0, 36, by = 4)) +
+  scale_y_continuous(breaks = seq(0, 10, by = 2)) +
+  theme_bw()
+
+```
+
+
+
+```{r}
+
+# Посчитаем сколько раз каждый анализ из списка интереса был взят у каждого пациента
+
+data_9_NA %>% 
+    group_by(id) %>% 
+    summarise(across(`d-dimer`:glucose, ~ sum(!is.na(.x)))) %>% 
+    select(!id) %>% 
+    pivot_longer(everything()) %>% 
+    group_by(name) %>% 
+    summarise(`Patients with analysis` = sum(value > 0),
+              `%` = 100 * `Patients with analysis` / 3169)
+
+```
+
+
+
+```{r}
+
+# Посмотрим, как эти числа меняются в зависимости от исхода
+
+data_9_NA %>% 
+    group_by(id, Outcome) %>% 
+    summarise(across(`d-dimer`:glucose, ~ sum(!is.na(.x)))) %>% 
+    pivot_longer(`d-dimer`:glucose) %>% 
+    group_by(name, Outcome) %>% 
+    summarise(`Patients with analysis` = sum(value > 0)) %>% 
+    mutate(`%` = (100 * `Patients with analysis` / ifelse(Outcome == 1, 904, 2265)) %>% round(1)) %>% 
+    flextable() %>% 
+    merge_v(j = 1) %>% 
+    theme_box() %>% 
+    align(align = "center", part = "all") 
+    
+```
+
+
+
+
+```{r}
+
+# Сделаем список пациентов, у которых хоть раз был взят каждый анализ
+
+data_9_NA %>% 
+    group_by(id) %>% 
+    summarise(across(`d-dimer`:glucose, ~ sum(!is.na(.x)))) %>% 
+    mutate(across(`d-dimer`:glucose, ~ ifelse(.x == 0, NA, .x))) %>% 
+    drop_na() %>% 
+    pull(id) -> complete_cases
+
+```
+
+Оценка шансов
+
+```{r}
+# count max_score
+score_9_max <- score_9 %>% group_by(id, Outcome) %>% summarise(max_score = max(score, na.rm = TRUE)) %>% filter(!is.na(max_score))
+score_9_max
+# logistic regression
+glm_outcome <- glm(Outcome ~ max_score, family=binomial, data = score_9_max)
+summary(glm_outcome)
+# outcome prediction
+max_score <- seq(1,36, by = 1)
+scores <- as.data.frame(max_score)
+predictions <- predict.glm(glm_outcome, scores, type="response", se.fit = TRUE)
+scores$outcome_pr <- predictions$fit
+ci <- 1.96 * predictions$se.fit
+scores$ci_low_pr <- predictions$fit - ci
+scores$ci_up_pr <- predictions$fit + ci
+scores$odd <- round(scores$outcome_pr/(1- scores$outcome_pr), 5)
+scores$ci_low_odd <- round(scores$ci_low_pr/(1- scores$ci_low_pr), 5)
+scores$ci_up_odd <- round(scores$ci_up_pr/(1-scores$ci_up_pr), 5)
+scores
+scores$max_score <- as.factor(scores$max_score)
+pd <- position_dodge(0.1) # move them .05 to the left and right
+ggplot(scores, aes(x=max_score, y=odd)) + 
+    geom_errorbar(aes(ymin=ci_low_odd, ymax=ci_up_odd), width=.1, position=pd) +
+    geom_line(position=pd) +
+    geom_point(position=pd) + theme_bw() + scale_y_log10(limits = c(0.001, 200), breaks=c(0.001,0.01,0.1,1,10,100), labels = c("1/1000", "1/100", "1/10", "1","10","100")) 
+#+ scale_y_discrete(name, breaks, labels, limits)
+# pd <- position_dodge(0.1) # move them .05 to the left and right
+# ggplot(scores, aes(x=max_score, y=outcome_pr)) + 
+#     geom_errorbar(aes(ymin=outcome_pr - ci, ymax=outcome_pr + ci), width=.1, position=pd) +
+#     geom_line(position=pd) +
+#     geom_point(position=pd) + theme_bw()
+# 
+# library(MASS)
+# frac <- factor(as.character(fractions(round(scores$odd, 1))), levels = unique(as.character(fractions(round(scores$odd, 1)))))
+# frac 
+# 
+# ggplot(scores, aes(x=max_score, y=frac)) + 
+#     geom_line(position=pd) +
+#     geom_point(position=pd) + theme_bw()
+```
+
+
+
+```{r}
+thresholds <- c("<4", "[4, 8)", "[8, 14)", "[14, 20)", ">=20")
+odds <- c("< 1:100","1:100 - 1:25", "1:25 -  1:5", "1:5 - 1:1", ">1:1")
+risk_grade <- c("Very Low", "Low", "Average", "High", "Very High")
+data <- data.frame(thresholds, odds, risk_grade)
+colnames(data) <- c("Score range", "Expected death/discharge odds", "Risk grade")
+data %>% flextable(cwidth = 1.5) %>%
+  theme_box() %>%
+  align(align = "center", part = "all") 
+```
+
+```{r}
+data <- filter(scores, max_score %in% c(4,8,14,20))
+ggplot(data, aes(x=max_score, y=odd, color = "")) + 
+    geom_errorbar(aes(ymin=ci_low_odd, ymax=ci_up_odd), width=.1, position=pd) +
+    geom_line(position=pd) +
+    geom_point(position=pd) + 
+    theme_bw() + 
+    scale_y_log10(breaks = c(0.01,0.04,0.2,1), labels = c("1/100","1/25","1/5","1")) + 
+    ylab("Odds + 95% CI") + 
+    xlab("Score grades") + 
+    theme(legend.position = "none")
+```
