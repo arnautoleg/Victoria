@@ -36,6 +36,8 @@ analysis_p <- read_xlsx("COVID_PROJECT_UPDATE_16.11.2021.xlsx", 4)
 analysis_u <- read_xlsx("COVID_PROJECT_UPDATE_16.11.2021.xlsx", 3)
 info_raw <- read_xlsx("COVID_PROJECT_UPDATE_16.11.2021.xlsx", 1)
 
+secondary <- read_xlsx("pacienti covid (1).xlsx", 3)
+
 ```
 ## Parse data
 ```{r}
@@ -649,8 +651,34 @@ ggplot(data, aes(x=max_score, y=odd, color = "")) +
 
 ```{r}
 
+secondary
 
 
+```
+
+
+```{r}
+# Load the tidyr package if not already loaded
+library(tidyr)
+
+# Assuming you have a data frame called df with 'id' and 'value' columns
+# Pivot the data frame from long to wide format
+wide_df <- pivot_wider(secondary, id_cols = id, names_from = code, values_from = code)
+
+# Print the wide format data frame
+print(wide_df)
+
+wide_df <- ifelse(is.na(wide_df), 0, 1)
+
+
+
+```
+
+
+```{r}
+
+
+summary(wide_df)
 
 ```
 
